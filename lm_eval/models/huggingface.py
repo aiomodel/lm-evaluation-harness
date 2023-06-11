@@ -14,6 +14,9 @@ from accelerate import find_executable_batch_size
 from lm_eval import utils
 from lm_eval.base import BaseLM
 
+from .custom_gpt2 import GPT2LMHeadModel
+from .custom_tokenizer import WarpTikTokenizer
+
 TokenSequence = Union[List[int], torch.LongTensor, torch.Tensor, BatchEncoding]
 
 _DeviceMapping = NewType("DeviceMapping", Mapping[str, Union[int, str, torch.device]])
@@ -71,6 +74,7 @@ class HuggingFaceAutoLM(BaseLM):
     def __init__(
         self,
         pretrained: str,
+        local_model: Optional[bool] = False,
         quantized: Optional[Union[bool, str]] = False,
         tokenizer: Optional[str] = None,
         subfolder: Optional[str] = None,
@@ -98,6 +102,8 @@ class HuggingFaceAutoLM(BaseLM):
                 The HuggingFace Hub model ID name or the path to a pre-trained
                 model to load. This is effectively the `pretrained_model_name_or_path`
                 argument of `from_pretrained` in the HuggingFace `transformers` API.
+            local_model (bool):
+                Means our own model or not
             quantized (str or bool, optional, defaults to False):
                 File name of a GPTQ quantized model to load. Set to `True` to use the
                 default name of the quantized model.
@@ -177,21 +183,31 @@ class HuggingFaceAutoLM(BaseLM):
         else:
             self._batch_size = int(batch_size)
 
+        self.local_model = local_model
         self._max_gen_toks = max_gen_toks
         self._max_length = max_length
-        self._config = self.AUTO_CONFIG_CLASS.from_pretrained(
-            pretrained,
-            trust_remote_code=trust_remote_code,
-            revision=revision + ("/" + subfolder if subfolder is not None else ""),
-        )
+        if not self.local_model:
+            self._config = self.AUTO_CONFIG_CLASS.from_pretrained(
+                pretrained,
+                trust_remote_code=trust_remote_code,
+                revision=revision + ("/" + subfolder if subfolder is not None else ""),
+            )
+        else:
+            # our own model
+            self._config = self.AUTO_CONFIG_CLASS.from_pretrained(pretrained)
 
         self._add_special_tokens = add_special_tokens
-        self.tokenizer = self._create_auto_tokenizer(
-            pretrained=pretrained,
-            revision=revision,
-            subfolder=subfolder,
-            tokenizer=tokenizer,
-        )
+        if not self.local_model:
+            self.tokenizer = self._create_auto_tokenizer(
+                pretrained=pretrained,
+                revision=revision,
+                subfolder=subfolder,
+                tokenizer=tokenizer,
+            )
+        else:
+            # our own model
+            self.tokenizer = WarpTikTokenizer(add_bos_token=False, add_eos_token=False) # TODO: not sure add bos or eos?
+
         self.tokenizer.model_max_length = self.max_length
 
         model_kwargs = {}
@@ -204,6 +220,8 @@ class HuggingFaceAutoLM(BaseLM):
             )
         self.model = self._create_auto_model(
             pretrained=pretrained,
+            local_model=local_model,
+            config=self._config,
             quantized=quantized,
             trust_remote_code=trust_remote_code,
             revision=revision,
@@ -239,6 +257,8 @@ class HuggingFaceAutoLM(BaseLM):
         self,
         *,
         pretrained: str,
+        local_model: bool,
+        config: Optional[dict] = None,
         quantized: Optional[Union[bool, str]] = False,
         revision: str,
         subfolder: str,
@@ -258,18 +278,30 @@ class HuggingFaceAutoLM(BaseLM):
             model_kwargs = {}
             if transformers.__version__ >= "4.30.0":
                 model_kwargs["load_in_4bit"] = load_in_4bit
-            model = self.AUTO_MODEL_CLASS.from_pretrained(
-                pretrained,
-                revision=revision + ("/" + subfolder if subfolder is not None else ""),
-                device_map=device_map,
-                max_memory=max_memory,
-                offload_folder=offload_folder,
-                load_in_8bit=load_in_8bit,
-                trust_remote_code=trust_remote_code,
-                torch_dtype=torch_dtype,
-                **model_kwargs,
-            )
+            if not local_model:
+                model = self.AUTO_MODEL_CLASS.from_pretrained(
+                    pretrained,
+                    revision=revision + ("/" + subfolder if subfolder is not None else ""),
+                    device_map=device_map,
+                    max_memory=max_memory,
+                    offload_folder=offload_folder,
+                    load_in_8bit=load_in_8bit,
+                    trust_remote_code=trust_remote_code,
+                    torch_dtype=torch_dtype,
+                    **model_kwargs,
+                )
+            else:
+                model = GPT2LMHeadModel(config)
+                model.from_pretrained(pretrained,
+                    device_map=device_map,
+                    max_memory=max_memory,
+                    offload_folder=offload_folder,
+                    load_in_8bit=load_in_8bit,
+                    torch_dtype=torch_dtype,
+                    **model_kwargs,
+                )
         else:
+            assert not local_model, "not support it"
             from auto_gptq import AutoGPTQForCausalLM
             model = AutoGPTQForCausalLM.from_quantized(
                 pretrained,
