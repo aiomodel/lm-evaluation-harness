@@ -67,6 +67,7 @@ class TikTokenizer(AbstractTokenizer):
         name = tokenizer_name_or_path
         super().__init__(name)
         self.tokenizer = tiktoken.get_encoding(tokenizer_name_or_path)
+        self.update_special = update_special
         eod_token = '<|endoftext|>'
         if update_special:
             src_spe = self.tokenizer._special_tokens
@@ -109,6 +110,10 @@ class TikTokenizer(AbstractTokenizer):
     
     def detokenize_safer(self, token_ids):
         return self.tokenizer.decode_bytes(token_ids)
+
+    @property
+    def eod_token(self):
+        return "<|msra_endoftext|>" if self.update_special else "<|endoftext|>"
 
     @property
     def pad(self):
@@ -201,6 +206,10 @@ class WarpTikTokenizer(PreTrainedTokenizer):
         """Returns vocab size"""
         return self.tokenizer.vocab_size
 
+    @property
+    def eos_token(self) -> str:
+        return self.tokenizer.eod_token
+    
     @property
     def bos_token_id(self) -> Optional[int]:
         return self.tokenizer.eod

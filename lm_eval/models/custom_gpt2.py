@@ -80,6 +80,32 @@ GPT2_PRETRAINED_MODEL_ARCHIVE_LIST = [
     # See all GPT-2 models at https://huggingface.co/models?filter=gpt2
 ]
 
+from torch.autograd import Variable
+from torch.nn.parameter import Parameter
+_FLOAT_TYPES = (torch.FloatTensor, torch.cuda.FloatTensor)
+_HALF_TYPES = (torch.HalfTensor, torch.cuda.HalfTensor)
+_BF16_TYPES = (torch.BFloat16Tensor, torch.cuda.BFloat16Tensor)
+
+def conversion_helper(val, conversion):
+    """Apply conversion to val. Recursively apply conversion if `val`
+    #is a nested tuple/list structure."""
+    if not isinstance(val, (tuple, list)):
+        return conversion(val)
+    rtn = [conversion_helper(v, conversion) for v in val]
+    if isinstance(val, tuple):
+        rtn = tuple(rtn)
+    return rtn
+
+def fp32_to_float16(val, float16_convertor):
+    """Convert fp32 `val` to fp16/bf16"""
+    def half_conversion(val):
+        val_typecheck = val
+        if isinstance(val_typecheck, (Parameter, Variable)):
+            val_typecheck = val.data
+        if isinstance(val_typecheck, _FLOAT_TYPES):
+            val = float16_convertor(val)
+        return val
+    return conversion_helper(val, half_conversion)
 
 def load_tf_weights_in_gpt2(model, config, gpt2_checkpoint_path):
     """Load tf checkpoints in a pytorch model"""
@@ -177,7 +203,7 @@ def rotate_half(x):
 
 @torch.jit.script
 def apply_rotary_pos_emb(q, k, cos, sin, offset: int = 0):
-    cos, sin = cos[offset:q.shape[2] + offset, ...].unsqueeze(0).unsqueeze(0), sin[offset:q.shape[2] + offset, ...].unsqueeze(0).unsqueeze(0)
+    cos, sin = cos[offset:q.shape[0] + offset, ...].unsqueeze(0).unsqueeze(0), sin[offset:q.shape[0] + offset, ...].unsqueeze(0).unsqueeze(0)
     return (q * cos) + (rotate_half(q) * sin), (k * cos) + (rotate_half(k) * sin)
 
 def apply_rotary_pos_emb_torch(q, k, cos, sin, offset: int = 0):  # jitting fails with bf16
@@ -228,11 +254,11 @@ class CoreAttention(nn.Module):
         # ===================================
 
         # [b, np, sq, hn] to [sq, b, np, hn] (align with old codes)
-        query_layer = query_layer.permute(2, 0, 1, 3)
-        key_layer = key_layer.permute(2, 0, 1, 3)
-        value_layer = value_layer.permute(2, 0, 1, 3)
+        query_layer = query_layer.permute(2, 0, 1, 3).contiguous()
+        key_layer = key_layer.permute(2, 0, 1, 3).contiguous()
+        value_layer = value_layer.permute(2, 0, 1, 3).contiguous()
         if layer_past is not None:
-            layer_past = layer_past.permute(2, 0, 1, 3)
+            layer_past = layer_past.permute(2, 0, 1, 3).contiguous()
 
         # [b, np, sq, sk]
         output_size = (query_layer.size(1),
@@ -257,7 +283,7 @@ class CoreAttention(nn.Module):
 
         # Rotary embeddings
         if self.rope:
-            apply_rotary_fn = apply_rotary_pos_emb
+            apply_rotary_fn = apply_rotary_pos_emb_torch
 
             seq_len = key_layer.shape[0]
             offset = 0
@@ -382,11 +408,11 @@ class FlashSelfAttention(nn.Module):
         # ===================================
 
         # [b, np, sq, hn] to [sq, b, np, hn] (align with old codes)
-        query_layer = query_layer.permute(2, 0, 1, 3)
-        key_layer = key_layer.permute(2, 0, 1, 3)
-        value_layer = value_layer.permute(2, 0, 1, 3)
+        query_layer = query_layer.permute(2, 0, 1, 3).contiguous()
+        key_layer = key_layer.permute(2, 0, 1, 3).contiguous()
+        value_layer = value_layer.permute(2, 0, 1, 3).contiguous()
         if layer_past is not None:
-            layer_past = layer_past.permute(2, 0, 1, 3)
+            layer_past = layer_past.permute(2, 0, 1, 3).contiguous()
 
         seqlen = query_layer.shape[0]
         assert seqlen == key_layer.shape[0]
@@ -400,7 +426,7 @@ class FlashSelfAttention(nn.Module):
         key_layer = key_layer.view(seqlen, batch_size * np, hn)
         # Rotary embeddings
         if self.rope:
-            apply_rotary_fn = apply_rotary_pos_emb
+            apply_rotary_fn = apply_rotary_pos_emb_torch
 
             seq_len = key_layer.shape[0]
             offset = 0
@@ -414,7 +440,11 @@ class FlashSelfAttention(nn.Module):
         key_layer = key_layer.view(seqlen, batch_size, np, hn)
         q, k, v = [rearrange(x, 's b ... -> b s ...').contiguous()
                 for x in (query_layer, key_layer, value_layer)]
-        assert q.dtype in [torch.float16, torch.bfloat16]
+        ori_type = q.dtype
+        q = fp32_to_float16(q, lambda _v: _v.bfloat16())
+        k = fp32_to_float16(k, lambda _v: _v.bfloat16())
+        v = fp32_to_float16(v, lambda _v: _v.bfloat16())
+        assert q.dtype in [v.float16, torch.bfloat16]
         assert q.is_cuda
 
         batch_size, seqlen = q.shape[0], q.shape[1]
@@ -429,6 +459,7 @@ class FlashSelfAttention(nn.Module):
         )
         output = rearrange(output, '(b s) ... -> b s ...', b=batch_size)
         context_layer = rearrange(output, 'b s h d -> s b (h d)').contiguous()
+        context_layer = context_layer.to(ori_type)
         return context_layer
 
 
@@ -683,6 +714,7 @@ class GPT2Attention(nn.Module):
 
         attn_output = self.c_proj(attn_output)
         attn_output = self.resid_dropout(attn_output)
+        attn_output = attn_output.permute(1, 0, 2).contiguous()  # [sq, b, h] to [b, sq, h]
 
         outputs = (attn_output, present)
         if output_attentions:

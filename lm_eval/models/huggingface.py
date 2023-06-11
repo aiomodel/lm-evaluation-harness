@@ -1,3 +1,4 @@
+import os
 import math
 import torch
 import torch.nn.functional as F
@@ -207,6 +208,9 @@ class HuggingFaceAutoLM(BaseLM):
         else:
             # our own model
             self.tokenizer = WarpTikTokenizer(add_bos_token=False, add_eos_token=False) # TODO: not sure add bos or eos?
+            # self.tokenizer.eos_token = "<|msra_endoftext|>"
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+            print(self.tokenizer.pad_token)
 
         self.tokenizer.model_max_length = self.max_length
 
@@ -245,12 +249,12 @@ class HuggingFaceAutoLM(BaseLM):
         torch.set_grad_enabled(False)
 
         self._device = device
-        if use_accelerate and "lm_head" in self.model.hf_device_map:
+        if use_accelerate and not self.local_model and "lm_head" in self.model.hf_device_map:
             # `accelerate` can place `lm_head` weights on a different device than
             # the user specified one so we force `self._device` to be the same as
             # `lm_head`'s.
             self._device = self.model.hf_device_map["lm_head"]
-        if not use_accelerate:
+        if not use_accelerate or (use_accelerate and self.local_model):
             self.model.to(self._device)
 
     def _create_auto_model(
@@ -300,6 +304,10 @@ class HuggingFaceAutoLM(BaseLM):
                     torch_dtype=torch_dtype,
                     **model_kwargs,
                 )
+                checkpoint_file = os.path.join(pretrained, "pytorch_model.bin")
+                ckpt = torch.load(checkpoint_file)
+                msg = model.load_state_dict(ckpt)
+                print("loading msg:", msg)
         else:
             assert not local_model, "not support it"
             from auto_gptq import AutoGPTQForCausalLM
