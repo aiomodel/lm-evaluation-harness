@@ -1,4 +1,5 @@
 import os
+import re
 import math
 import torch
 import torch.nn.functional as F
@@ -76,6 +77,7 @@ class HuggingFaceAutoLM(BaseLM):
         self,
         pretrained: str,
         local_model: Optional[bool] = False,
+        mute_flash: Optional[bool] = False,
         quantized: Optional[Union[bool, str]] = False,
         tokenizer: Optional[str] = None,
         subfolder: Optional[str] = None,
@@ -225,6 +227,7 @@ class HuggingFaceAutoLM(BaseLM):
         self.model = self._create_auto_model(
             pretrained=pretrained,
             local_model=local_model,
+            mute_flash=mute_flash,
             config=self._config,
             quantized=quantized,
             trust_remote_code=trust_remote_code,
@@ -238,6 +241,7 @@ class HuggingFaceAutoLM(BaseLM):
         )
         # note: peft_path can be different than pretrained model path
         if peft is not None:
+            assert not local_model, "haven't test it"
             self.model = self._create_auto_model_peft(
                 model=self.model,
                 peft=peft,
@@ -262,6 +266,7 @@ class HuggingFaceAutoLM(BaseLM):
         *,
         pretrained: str,
         local_model: bool,
+        mute_flash: Optional[bool] = False,
         config: Optional[dict] = None,
         quantized: Optional[Union[bool, str]] = False,
         revision: str,
@@ -295,6 +300,10 @@ class HuggingFaceAutoLM(BaseLM):
                     **model_kwargs,
                 )
             else:
+                if mute_flash:
+                    assert config.use_flash_attn, "pre-train model is non-flash, by default flash is muted. Don't set it"
+                    config.use_flash_attn = False
+                    config.scale_attn_weights = True
                 model = GPT2LMHeadModel(config)
                 model.from_pretrained(pretrained,
                     device_map=device_map,
@@ -306,8 +315,18 @@ class HuggingFaceAutoLM(BaseLM):
                 )
                 checkpoint_file = os.path.join(pretrained, "pytorch_model.bin")
                 ckpt = torch.load(checkpoint_file)
-                msg = model.load_state_dict(ckpt)
-                print("loading msg:", msg)
+                msg = model.load_state_dict(ckpt, strict=False)
+                missing_keys = msg.missing_keys
+                unexpected_keys = msg.unexpected_keys
+                #### NOTICE: inv_freq, core_attention.bias, core_attention.masked_bias are buffers, which can be ignored
+                if model._keys_to_ignore_on_load_missing is not None:
+                    for pat in model._keys_to_ignore_on_load_missing:
+                        missing_keys = [k for k in missing_keys if re.search(pat, k) is None]
+                if model._keys_to_ignore_on_load_unexpected is not None:
+                    for pat in model._keys_to_ignore_on_load_unexpected:
+                        unexpected_keys = [k for k in unexpected_keys if re.search(pat, k) is None]
+                print("loading msg:", "\n\tmissing:", missing_keys, "\n\tunexpected:", unexpected_keys)
+                assert len(missing_keys) == 0 and len(unexpected_keys) == 0, "error in loading ckpt"
         else:
             assert not local_model, "not support it"
             from auto_gptq import AutoGPTQForCausalLM

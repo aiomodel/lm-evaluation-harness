@@ -312,7 +312,7 @@ class CoreAttention(nn.Module):
         # ===========================
 
         # if only "normal" attention layer implements causal mask
-        query_length, key_length = query_layer.size(-2), key_layer.size(-2)
+        query_length, key_length = query_layer.size(-3), key_layer.size(-3)
         causal_mask = self.bias[:, :, key_length - query_length : key_length, :key_length]
         mask_value = torch.finfo(attention_scores.dtype).min
         # Need to be a tensor, otherwise we get error: `RuntimeError: expected scalar type float but found double`.
@@ -331,7 +331,7 @@ class CoreAttention(nn.Module):
 
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.
-        attention_probs = self.attention_dropout(attention_probs)
+        attention_scores = self.attention_dropout(attention_scores)
 
         # =========================
         # Context layer. [sq, b, hp]
@@ -351,11 +351,11 @@ class CoreAttention(nn.Module):
                                        output_size[0] * output_size[1], -1)
 
         # change view [b * np, sq, sk]
-        attention_probs = attention_probs.view(output_size[0] * output_size[1],
+        attention_scores = attention_scores.view(output_size[0] * output_size[1],
                                                output_size[2], -1)
 
         # matmul: [b * np, sq, hn]
-        context_layer = torch.bmm(attention_probs, value_layer.transpose(0, 1))
+        context_layer = torch.bmm(attention_scores, value_layer.transpose(0, 1))
 
         # change view [b, np, sq, hn]
         context_layer = context_layer.view(*output_size)
@@ -522,7 +522,6 @@ class GPT2Attention(nn.Module):
                 config, attention_dropout=config.attn_pdrop, softmax_scale=None if not self.scale_attn_weights else 1 / float(self.embed_dim) ** 0.5,
             )
         else:
-            assert False, "not test it"
             self.core_attention = CoreAttention(config, self.layer_idx+1)
 
     def prune_heads(self, heads):
@@ -694,7 +693,7 @@ class GPT2Attention(nn.Module):
         if not self.use_flash_attn:
             attn_output = self.core_attention(
                 query, key, value, attention_mask,
-                layer_past=layer_past, attention_mask=attention_mask
+                layer_past=layer_past
             )
         else:
             assert attention_mask is None, "don't support it in flash attention"
@@ -1343,7 +1342,8 @@ class GPT2Model(GPT2PreTrainedModel):
     GPT2_START_DOCSTRING,
 )
 class GPT2LMHeadModel(GPT2PreTrainedModel):
-    _keys_to_ignore_on_load_missing = [r"attn.masked_bias", r"attn.bias", r"lm_head.weight"]
+    _keys_to_ignore_on_load_missing = [r"attn.masked_bias", r"attn.bias", r"lm_head.weight", r"rotary_emb.inv_freq"]
+    _keys_to_ignore_on_load_unexpected = [r"rotary_emb.inv_freq"]
 
     def __init__(self, config):
         super().__init__(config)
