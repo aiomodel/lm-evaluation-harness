@@ -233,6 +233,8 @@ class WarpTikTokenizer(PreTrainedTokenizer):
 
     def _convert_token_to_id(self, token):
         """Converts a token (str) in an id using the vocab."""
+        if token == self.eos_token:
+            return self.eos_token_id
         return self.tokenizer.vocab[token]
 
     def _convert_id_to_token(self, index):
@@ -249,13 +251,13 @@ class WarpTikTokenizer(PreTrainedTokenizer):
             if token in self.all_special_tokens:
                 if not prev_is_special and i != 0:
                     out_string += " "
-                out_string += self.tokenizer.detokenize(current_sub_tokens) + token
+                out_string += b"".join(current_sub_tokens).decode("utf-8") + token
                 prev_is_special = True
                 current_sub_tokens = []
             else:
                 current_sub_tokens.append(token)
                 prev_is_special = False
-        out_string += self.sp_model.decode(current_sub_tokens)
+        out_string += b"".join(current_sub_tokens).decode("utf-8")
         return out_string
 
     def save_vocabulary(self, save_directory, filename_prefix: Optional[str] = None) -> Tuple[str]:
