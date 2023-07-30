@@ -107,3 +107,39 @@ python main.py \
         --output_path results/test_lambada.json \
         --batch_size 64 \
         --no_cache
+        
+## mute flash attention
+python main.py \
+        --model hf-causal-experimental \
+        --model_args local_model=True,mute_flash=True,pretrained=/mnt/checkpoints/ours_6b7_DistDataV2_CCv3_300B_tohf/,use_accelerate=True \
+        --tasks lambada_openai \
+        --device cuda \
+        --output_path results/test_lambada.json \
+        --batch_size 64 \
+        --no_cache
+
+## new version 0728
+python main.py \
+        --model hf-causal-experimental \
+        --model_args local_model=True,mute_flash=True,pretrained=/mnt/checkpoints/ours_6b7_DistDataV2_CCv3_980Bof1000B_tohf/ \
+        --tasks anli_r1,anli_r2,anli_r3,arc_easy,arc_challenge,boolq,cb,hellaswag \
+        --device cuda \
+        --output_path results/our-1T-ollama-testsuit-0shot-p1.json \
+        --batch_size 64 \
+        --no_cache;
+python main.py \
+        --model hf-causal-experimental \
+        --model_args local_model=True,mute_flash=True,pretrained=/mnt/checkpoints/ours_6b7_DistDataV2_CCv3_980Bof1000B_tohf/ \
+        --tasks openbookqa,piqa,rte,truthfulqa_mc,wic,winogrande,wsc \
+        --device cuda \
+        --output_path results/our-1T-ollama-testsuit-0shot-p2.json \
+        --batch_size 64 \
+        --no_cache;
+python main.py \
+        --model hf-causal-experimental \
+        --model_args local_model=True,mute_flash=True,pretrained=/mnt/checkpoints/ours_6b7_DistDataV2_CCv3_980Bof1000B_tohf/ \
+        --tasks record \
+        --device cuda \
+        --output_path results/our-1T-ollama-testsuit-0shot-record.json \
+        --batch_size 64 \
+        --no_cache;
