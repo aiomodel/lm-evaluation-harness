@@ -74,9 +74,9 @@ class HFLM(BaseLM):
             ).eval()
         else:
             self._config = transformers.AutoConfig.from_pretrained(pretrained)
-            self.config.use_flash_attn = False
-            self.config.scale_attn_weights = True
-            self.gpt2 = GPT2ForCausalLM(self.config)
+            self._config.use_flash_attn = False
+            self._config.scale_attn_weights = True
+            self.gpt2 = GPT2ForCausalLM(self._config)
             self.gpt2.from_pretrained(
                 pretrained,
                 load_in_8bit=load_in_8bit,
