@@ -1,7 +1,10 @@
+import os
 import torch
 import transformers
 from typing import Optional, Union
 from lm_eval.base import BaseLM
+from .custom_gpt2 import GPT2LMHeadModel, GPT2ForCausalLM
+from .custom_tokenizer import WarpTikTokenizer
 
 
 def _get_dtype(
@@ -30,6 +33,7 @@ class HFLM(BaseLM):
         tokenizer=None,
         batch_size=1,
 	max_length=None,
+        local_model: Optional[bool] = False,
         load_in_8bit: Optional[bool] = False,
         trust_remote_code: Optional[bool] = False,
         dtype: Optional[Union[str, torch.dtype]]="auto",
@@ -58,24 +62,50 @@ class HFLM(BaseLM):
         # TODO: update this to be less of a hack once subfolder is fixed in HF
         revision = revision + ("/" + subfolder if subfolder is not None else "")
 
-        self.gpt2 = transformers.AutoModelForCausalLM.from_pretrained(
-            pretrained,
-            load_in_8bit=load_in_8bit,
-            low_cpu_mem_usage=low_cpu_mem_usage,
-            revision=revision,
-            torch_dtype=_get_dtype(dtype),
-            trust_remote_code=trust_remote_code,
-        ).eval()
+        self.local_model = local_model
+        if not self.local_model:
+            self.gpt2 = transformers.AutoModelForCausalLM.from_pretrained(
+                pretrained,
+                load_in_8bit=load_in_8bit,
+                low_cpu_mem_usage=low_cpu_mem_usage,
+                revision=revision,
+                torch_dtype=_get_dtype(dtype),
+                trust_remote_code=trust_remote_code,
+            ).eval()
+        else:
+            self._config = transformers.AutoConfig.from_pretrained(pretrained)
+            self.config.use_flash_attn = False
+            self.config.scale_attn_weights = True
+            self.gpt2 = GPT2ForCausalLM(self.config)
+            self.gpt2.from_pretrained(
+                pretrained,
+                load_in_8bit=load_in_8bit,
+                low_cpu_mem_usage=low_cpu_mem_usage,
+                revision=revision,
+                torch_dtype=_get_dtype(dtype),
+                trust_remote_code=trust_remote_code,
+            )
+            checkpoint_file = os.path.join(pretrained, "pytorch_model.bin")
+            ckpt = torch.load(checkpoint_file)
+            msg = self.gpt2.load_state_dict(ckpt, strict=False)
+
         if not load_in_8bit:
             try:
                 self.gpt2.to(self.device)
             except:
                 print("Failed to place model onto specified device. This may be because the model is quantized via `bitsandbytes`. If the desired GPU is being used, this message is safe to ignore.")
-        self.tokenizer = transformers.AutoTokenizer.from_pretrained(
-            pretrained if tokenizer is None else tokenizer,
-            revision=revision,
-            trust_remote_code=trust_remote_code,
-        )
+        if not self.local_model:
+            self.tokenizer = transformers.AutoTokenizer.from_pretrained(
+                pretrained if tokenizer is None else tokenizer,
+                revision=revision,
+                trust_remote_code=trust_remote_code,
+            )
+        else:
+            # our own model
+            self.tokenizer = WarpTikTokenizer(add_bos_token=False, add_eos_token=False) # TODO: not sure add bos or eos?
+            # self.tokenizer.eos_token = "<|msra_endoftext|>"
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+            print(self.tokenizer.pad_token)
 
         self.vocab_size = self.tokenizer.vocab_size
 

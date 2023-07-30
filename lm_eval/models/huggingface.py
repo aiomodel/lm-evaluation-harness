@@ -1,3 +1,5 @@
+import os
+import re
 import math
 import torch
 import torch.nn.functional as F
@@ -12,6 +14,9 @@ from transformers import BatchEncoding
 
 from lm_eval import utils
 from lm_eval.base import BaseLM
+
+from .custom_gpt2 import GPT2LMHeadModel
+from .custom_tokenizer import WarpTikTokenizer
 
 TokenSequence = Union[List[int], torch.LongTensor, torch.Tensor, BatchEncoding]
 
@@ -70,6 +75,8 @@ class HuggingFaceAutoLM(BaseLM):
     def __init__(
         self,
         pretrained: str,
+        local_model: Optional[bool] = False,
+        mute_flash: Optional[bool] = False,
         quantized: Optional[Union[bool, str]] = False,
         tokenizer: Optional[str] = None,
         subfolder: Optional[str] = None,
@@ -100,6 +107,8 @@ class HuggingFaceAutoLM(BaseLM):
                 The HuggingFace Hub model ID name or the path to a pre-trained
                 model to load. This is effectively the `pretrained_model_name_or_path`
                 argument of `from_pretrained` in the HuggingFace `transformers` API.
+            local_model (bool):
+                Means our own model or not
             quantized (str or bool, optional, defaults to False):
                 File name of a GPTQ quantized model to load. Set to `True` to use the
                 default name of the quantized model.
@@ -189,21 +198,34 @@ class HuggingFaceAutoLM(BaseLM):
             self._batch_size = int(batch_size)
         self.max_batch_size = max_batch_size
 
+        self.local_model = local_model
         self._max_gen_toks = max_gen_toks
         self._max_length = max_length
-        self._config = self.AUTO_CONFIG_CLASS.from_pretrained(
-            pretrained,
-            trust_remote_code=trust_remote_code,
-            revision=revision + ("/" + subfolder if subfolder is not None else ""),
-        )
+        if not self.local_model:
+            self._config = self.AUTO_CONFIG_CLASS.from_pretrained(
+                pretrained,
+                trust_remote_code=trust_remote_code,
+                revision=revision + ("/" + subfolder if subfolder is not None else ""),
+            )
+        else:
+            # our own model
+            self._config = self.AUTO_CONFIG_CLASS.from_pretrained(pretrained)
 
         self._add_special_tokens = add_special_tokens
-        self.tokenizer = self._create_auto_tokenizer(
-            pretrained=pretrained,
-            revision=revision,
-            subfolder=subfolder,
-            tokenizer=tokenizer,
-        )
+        if not self.local_model:
+            self.tokenizer = self._create_auto_tokenizer(
+                pretrained=pretrained,
+                revision=revision,
+                subfolder=subfolder,
+                tokenizer=tokenizer,
+            )
+        else:
+            # our own model
+            self.tokenizer = WarpTikTokenizer(add_bos_token=False, add_eos_token=False) # TODO: not sure add bos or eos?
+            # self.tokenizer.eos_token = "<|msra_endoftext|>"
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+            print(self.tokenizer.pad_token)
+
         self.tokenizer.model_max_length = self.max_length
 
         model_kwargs = {}
@@ -216,6 +238,9 @@ class HuggingFaceAutoLM(BaseLM):
             )
         self.model = self._create_auto_model(
             pretrained=pretrained,
+            local_model=local_model,
+            mute_flash=mute_flash,
+            config=self._config,
             quantized=quantized,
             trust_remote_code=trust_remote_code,
             revision=revision,
@@ -230,6 +255,7 @@ class HuggingFaceAutoLM(BaseLM):
         )
         # note: peft_path can be different than pretrained model path
         if peft is not None:
+            assert not local_model, "haven't test it"
             self.model = self._create_auto_model_peft(
                 model=self.model,
                 peft=peft,
@@ -241,12 +267,12 @@ class HuggingFaceAutoLM(BaseLM):
         torch.set_grad_enabled(False)
 
         self._device = device
-        if use_accelerate and "lm_head" in self.model.hf_device_map:
+        if use_accelerate and not self.local_model and "lm_head" in self.model.hf_device_map:
             # `accelerate` can place `lm_head` weights on a different device than
             # the user specified one so we force `self._device` to be the same as
             # `lm_head`'s.
             self._device = self.model.hf_device_map["lm_head"]
-        if not use_accelerate and not (load_in_4bit or load_in_8bit):
+        if (not use_accelerate and not (load_in_4bit or load_in_8bit)) or (use_accelerate and self.local_model):
             try:
                 self.model.to(self._device)
             except:
@@ -256,6 +282,9 @@ class HuggingFaceAutoLM(BaseLM):
         self,
         *,
         pretrained: str,
+        local_model: bool,
+        mute_flash: Optional[bool] = False,
+        config: Optional[dict] = None,
         quantized: Optional[Union[bool, str]] = False,
         revision: str,
         subfolder: str,
@@ -280,18 +309,48 @@ class HuggingFaceAutoLM(BaseLM):
                 if load_in_4bit:
                     model_kwargs["bnb_4bit_quant_type"] = bnb_4bit_quant_type
                     model_kwargs["bnb_4bit_compute_dtype"] = getattr(torch, bnb_4bit_compute_dtype)
-            model = self.AUTO_MODEL_CLASS.from_pretrained(
-                pretrained,
-                revision=revision + ("/" + subfolder if subfolder is not None else ""),
-                device_map=device_map,
-                max_memory=max_memory,
-                offload_folder=offload_folder,
-                load_in_8bit=load_in_8bit,
-                trust_remote_code=trust_remote_code,
-                torch_dtype=torch_dtype,
-                **model_kwargs,
-            )
+            if not local_model:
+                model = self.AUTO_MODEL_CLASS.from_pretrained(
+                    pretrained,
+                    revision=revision + ("/" + subfolder if subfolder is not None else ""),
+                    device_map=device_map,
+                    max_memory=max_memory,
+                    offload_folder=offload_folder,
+                    load_in_8bit=load_in_8bit,
+                    trust_remote_code=trust_remote_code,
+                    torch_dtype=torch_dtype,
+                    **model_kwargs,
+                )
+            else:
+                if mute_flash:
+                    assert config.use_flash_attn, "pre-train model is non-flash, by default flash is muted. Don't set it"
+                    config.use_flash_attn = False
+                    config.scale_attn_weights = True
+                model = GPT2LMHeadModel(config)
+                model.from_pretrained(pretrained,
+                    device_map=device_map,
+                    max_memory=max_memory,
+                    offload_folder=offload_folder,
+                    load_in_8bit=load_in_8bit,
+                    torch_dtype=torch_dtype,
+                    **model_kwargs,
+                )
+                checkpoint_file = os.path.join(pretrained, "pytorch_model.bin")
+                ckpt = torch.load(checkpoint_file)
+                msg = model.load_state_dict(ckpt, strict=False)
+                missing_keys = msg.missing_keys
+                unexpected_keys = msg.unexpected_keys
+                #### NOTICE: inv_freq, core_attention.bias, core_attention.masked_bias are buffers, which can be ignored
+                if model._keys_to_ignore_on_load_missing is not None:
+                    for pat in model._keys_to_ignore_on_load_missing:
+                        missing_keys = [k for k in missing_keys if re.search(pat, k) is None]
+                if model._keys_to_ignore_on_load_unexpected is not None:
+                    for pat in model._keys_to_ignore_on_load_unexpected:
+                        unexpected_keys = [k for k in unexpected_keys if re.search(pat, k) is None]
+                print("loading msg:", "\n\tmissing:", missing_keys, "\n\tunexpected:", unexpected_keys)
+                assert len(missing_keys) == 0 and len(unexpected_keys) == 0, "error in loading ckpt"
         else:
+            assert not local_model, "not support it"
             from auto_gptq import AutoGPTQForCausalLM
             model = AutoGPTQForCausalLM.from_quantized(
                 pretrained,
