@@ -1,7 +1,9 @@
+import re
 import os
 import torch
 import transformers
-from typing import Optional, Union
+from typing import Optional, Union,List
+from pathlib import Path
 from lm_eval.base import BaseLM
 from .custom_gpt2 import GPT2LMHeadModel, GPT2ForCausalLM
 from .custom_tokenizer import WarpTikTokenizer
@@ -18,6 +20,11 @@ def _get_dtype(
         _torch_dtype = dtype
     return _torch_dtype
 
+
+def find_all_ckps(path:Path)->List[Path]:
+    ckp_pattern = "pytorch_model.*bin$"
+    ckp_paths = [path/file for file in os.listdir(path) if re.search(ckp_pattern, file) is not None]
+    return ckp_paths
 
 class HFLM(BaseLM):
 
@@ -85,9 +92,11 @@ class HFLM(BaseLM):
                 torch_dtype=_get_dtype(dtype),
                 trust_remote_code=trust_remote_code,
             )
-            checkpoint_file = os.path.join(pretrained, "pytorch_model.bin")
-            ckpt = torch.load(checkpoint_file)
-            msg = self.gpt2.load_state_dict(ckpt, strict=False)
+            ckp_paths = find_all_ckps(Path(pretrained))
+            ckpts = [torch.load(ckp_path) for ckp_path in ckp_paths]
+            print("Loading from", ckp_paths)
+            for ckpt in ckpts:
+                self.gpt2.load_state_dict(ckpt, strict=False)
 
         if not load_in_8bit:
             try:
