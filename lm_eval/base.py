@@ -302,7 +302,7 @@ class BaseLM(LM):
             index = 0
             if self.LOAD_MODE:
                 import json
-                _results = json.load(open(f"../data/results.json"))
+                _results = json.load(open(f"data/results.json"))
                 print(f"We load n={len(_results)} samples")
 
         for chunk in utils.chunks(
@@ -415,8 +415,8 @@ class BaseLM(LM):
                 res.append(answer)
         if self.SAVE_MODE:
             import json
-            os.makedirs("../data", exist_ok=True)
-            json.dump(raw_data, open(f"../data/data.json", "w"))
+            os.makedirs("data", exist_ok=True)
+            json.dump(raw_data, open(f"data/data.json", "w"))
             exit()
         return re_ord.get_original(res)
 

@@ -57,7 +57,7 @@ def load_reward_model(
     return model
 
 
-def forward_scores(local_rank, reward_model_path, shared_list, max_size):
+def forward_scores(local_rank, reward_model_path, shared_list):
     try:
         world_size = len(os.environ["CUDA_VISIBLE_DEVICES"].split(","))
     except:
