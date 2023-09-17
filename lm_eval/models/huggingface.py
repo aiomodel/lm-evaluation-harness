@@ -100,6 +100,8 @@ class HuggingFaceAutoLM(BaseLM):
         gptq_use_triton: Optional[bool] = False,
         bnb_4bit_quant_type: Optional[str] = None,
         bnb_4bit_compute_dtype: Optional[Union[str, torch.dtype]] = None,
+        SAVE_MODE: Optional[bool] = False,
+        LOAD_MODE: Optional[bool] = False,
     ):
         """Initializes a HuggingFace `AutoModel` and `AutoTokenizer` for evaluation.
         Args:
@@ -173,6 +175,8 @@ class HuggingFaceAutoLM(BaseLM):
         """
         super().__init__()
 
+        self.SAVE_MODE = SAVE_MODE
+        self.LOAD_MODE = LOAD_MODE
         assert isinstance(pretrained, str)
         assert isinstance(device, str)
         assert isinstance(batch_size, (int, str))

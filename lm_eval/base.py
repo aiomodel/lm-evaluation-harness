@@ -124,6 +124,8 @@ class BaseLM(LM):
         self.batch_schedule = 1
         self.batch_sizes = {}
         self.max_batch_size = 512
+        self.SAVE_MODE = False
+        self.LOAD_MODE = False
 
     @property
     @abstractmethod
@@ -295,6 +297,14 @@ class BaseLM(LM):
             print(f"Determined largest batch size: {self.batch_sizes[sched]}")
             return self.batch_sizes[sched]
 
+        if self.SAVE_MODE or self.LOAD_MODE:
+            raw_data = {}
+            index = 0
+            if self.LOAD_MODE:
+                import json
+                _results = json.load(open(f"../data/results.json"))
+                print(f"We load n={len(_results)} samples")
+
         for chunk in utils.chunks(
             tqdm(reordered_requests, disable=disable_tqdm),
             n=self.batch_size if self.batch_size != "auto" else override_bs if override_bs is not None else 0,
@@ -353,6 +363,21 @@ class BaseLM(LM):
                 inplens.append(inplen)
 
             batched_inps = torch.cat(inps, dim=0)  # [batch, padding_length
+            if self.SAVE_MODE:
+                batched_inps = batched_inps.cpu().numpy().tolist()
+                raw_data[index] = [batched_inps, chunk, inplens, cont_toks_list]
+                index += 1
+                continue
+            if self.LOAD_MODE:
+                # LLLLLOAD
+                batched_inps = batched_inps.cpu().numpy()
+                saved_batched_inps = _results[str(index)][0]
+                assert np.sum(saved_batched_inps - batched_inps) == 0, f"{np.sum(saved_batched_inps - batched_inps)}"
+                for cache_key, answer in _results[str(index)][1]:
+                    res.append(answer)
+                    self.cache_hook.add_partial("loglikelihood", cache_key, answer)
+                index += 1
+                continue
             multi_logits = F.log_softmax(
                 self._model_call(batched_inps), dim=-1
             ).cpu()  # [batch, padding_length, vocab]
@@ -388,7 +413,11 @@ class BaseLM(LM):
                     self.cache_hook.add_partial("loglikelihood", cache_key, answer)
 
                 res.append(answer)
-
+        if self.SAVE_MODE:
+            import json
+            os.makedirs("../data", exist_ok=True)
+            json.dump(raw_data, open(f"../data/data.json", "w"))
+            exit()
         return re_ord.get_original(res)
 
     def greedy_until(self, requests):
