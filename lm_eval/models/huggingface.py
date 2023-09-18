@@ -1,6 +1,7 @@
 import os
 
 import torch
+import numpy as np
 import transformers
 from transformers.models.auto.modeling_auto import (
     MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
@@ -94,9 +95,13 @@ class HFLM(LM):
         bnb_4bit_compute_dtype: Optional[Union[str, torch.dtype]] = None,
         gptq: Optional[Union[bool, str]] = False,
         gptq_use_triton: Optional[bool] = False,
+        SAVE_MODE: Optional[bool] = False,
+        LOAD_MODE: Optional[bool] = False,
     ) -> None:
         super().__init__()
 
+        self.SAVE_MODE = SAVE_MODE
+        self.LOAD_MODE = LOAD_MODE
         assert isinstance(device, str)
         assert isinstance(pretrained, str)
         assert isinstance(batch_size, (int, str))
@@ -304,6 +309,24 @@ class HFLM(LM):
                 ], "Unsupported distributed type provided. Only DDP and FSDP are supported."
                 if accelerator.distributed_type == DistributedType.FSDP:
                     self._model = accelerator.prepare(self.model)
+                    # from transformers.models.llama.modeling_llama import LlamaDecoderLayer
+                    # from torch.distributed.fsdp.fully_sharded_data_parallel import  ShardingStrategy
+                    # from torch.distributed.fsdp.fully_sharded_data_parallel import CPUOffload
+                    # from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel as FSDP
+                    # from torch.distributed.fsdp.wrap import  transformer_auto_wrap_policy
+                    # import functools
+                    # auto_wrap_policy = functools.partial(
+                    #  transformer_auto_wrap_policy,
+                    #  transformer_layer_cls={LlamaDecoderLayer},
+                    # )
+                    # print("rank", accelerator.local_process_index)
+                    # self._model = FSDP(
+                    #   self.model,
+                    #   sharding_strategy=ShardingStrategy.FULL_SHARD,
+                    #   cpu_offload=CPUOffload(offload_params=True),
+                    #   auto_wrap_policy=auto_wrap_policy,
+                    #   device_id=accelerator.local_process_index
+                    # )
                 else:
                     self._model = accelerator.prepare_model(
                         self.model, evaluation_mode=True
@@ -658,6 +681,12 @@ class HFLM(LM):
             print(f"Determined largest batch size: {self.batch_sizes[sched]}")
             return self.batch_sizes[sched]
 
+        if self.SAVE_MODE or self.LOAD_MODE:
+            raw_data = {self.accelerator.local_process_index: {}}
+            index = 0
+            if self.LOAD_MODE:
+                import json
+                _results = json.load(open(f"/mnt/lm-evaluation-harness-refactor/data/{self.accelerator.local_process_index}-results.json"))
         for chunk in utils.chunks(
             tqdm(re_ord.get_reordered(), disable=(disable_tqdm or (self.rank != 0))),
             n=self.batch_size
@@ -765,6 +794,21 @@ class HFLM(LM):
                     "labels": batched_conts,
                 }
 
+            if self.SAVE_MODE:
+                batched_inps = batched_inps.cpu().numpy().tolist()
+                raw_data[self.accelerator.local_process_index][index] = [batched_inps, chunk, inplens, cont_toks_list, padding_len_inp]
+                index += 1
+                continue
+            if self.LOAD_MODE:
+                # LLLLLOAD
+                batched_inps = batched_inps.cpu().numpy()
+                saved_batched_inps = _results[str(index)][0]
+                assert np.sum(saved_batched_inps - batched_inps) == 0, f"{np.sum(saved_batched_inps - batched_inps)}"
+                for cache_key, answer in _results[str(index)][1]:
+                    res.append(answer)
+                    self.cache_hook.add_partial("loglikelihood", cache_key, answer)
+                index += 1
+                continue
             multi_logits = F.log_softmax(
                 self._model_call(batched_inps, **call_kwargs), dim=-1
             )  # [batch, padding_length (inp or cont), vocab]
@@ -807,7 +851,10 @@ class HFLM(LM):
                 res.append(answer)
 
                 self.cache_hook.add_partial("loglikelihood", cache_key, answer)
-
+        if self.SAVE_MODE:
+            import json
+            json.dump(raw_data, open(f"/mnt/lm-evaluation-harness-refactor/data/{self.accelerator.local_process_index}.json", "w"))
+            exit()
         return re_ord.get_original(res)
 
     def greedy_until(self, requests):
