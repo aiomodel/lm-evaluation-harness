@@ -102,18 +102,22 @@ def forward_scores(local_rank, reward_model_path, shared_list):
 
         # split data
         lengths = len(data)
-        lengths_per_size = lengths // world_size + 1
+        if lengths % world_size != 0:
+            lengths_per_size = lengths // world_size + 1
+        else:
+            lengths_per_size = lengths // world_size
         splitted_data = {}
         item_count = 0
-        for k, v in splitted_data.items():
+        for k, v in data.items():
             if item_count >= lengths_per_size * local_rank and item_count < lengths_per_size * (local_rank + 1):
                 splitted_data[k] = v
             item_count += 1
         # pad size
         if len(splitted_data) < lengths_per_size:
             print(lengths_per_size, len(splitted_data), len(data), local_rank)
+            pad_item = splitted_data[list(splitted_data.keys())[0]]
             for i in range(len(splitted_data.keys()), lengths_per_size):
-                splitted_data[-i] = splitted_data[list(data.keys())[0]]        
+                splitted_data[-i] = pad_item
         data = splitted_data
 
         for index, (batched_inps, chunk, inplens, cont_toks_list) in tqdm.tqdm(data.items()):
@@ -134,7 +138,7 @@ def forward_scores(local_rank, reward_model_path, shared_list):
 
                 # Check if per-token argmax is exactly equal to continuation
                 greedy_tokens = logits.argmax(dim=-1)
-                cont_toks = torch.tensor(cont_toks, dtype=torch.long).unsqueeze(
+                cont_toks = torch.tensor(cont_toks, dtype=torch.long).cuda().unsqueeze(
                     0
                 )  # [1, seq]
                 max_equal = (greedy_tokens == cont_toks).all()
@@ -177,8 +181,9 @@ def main(
 
     results = {}
     # save results
-    for local_rank, local_results in shared_list:
-        for k, v in local_results:
+    for local_results in shared_list:
+        local_rank, local_results = local_results
+        for k, v in local_results.items():
             results[k] = v
     data = json.load(open(f"../../data/data.json"))
     assert len(results) == len(data), f"{len(results)} v.s. {len(data)}"
